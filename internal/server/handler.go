@@ -13,6 +13,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 
+	"github.com/maxid/gfluxy/internal/lb"
 	"github.com/maxid/gfluxy/internal/registry"
 	"github.com/maxid/gfluxy/internal/registry/health"
 	"github.com/maxid/gfluxy/internal/route"
@@ -23,10 +24,10 @@ const handlerName = "gfluxy"
 // gateway is the immutable state a request reads: the routing table and the
 // registry. Replacing the pointer is the whole of a hot update.
 type gateway struct {
-	table  *route.Table
-	reg    registry.Registry
-	health *health.Tracker
-	rr     atomic.Uint64
+	table    *route.Table
+	reg      registry.Registry
+	health   *health.Tracker
+	policies map[string]lb.Policy
 }
 
 var active atomic.Pointer[gateway]
@@ -66,7 +67,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		return nil
 	}
 
-	endpoint, ok := g.pick(rt.Service)
+	policy := g.policyFor(rt.Policy)
+	endpoint, ok := g.pick(policy, rt.Service, stickyKey(r))
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "no healthy upstream for "+rt.Service)
 		return nil
@@ -82,6 +84,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	r.Header.Set("X-Gfluxy-Route", rt.Service+":"+rt.PathPrefix)
 
 	proxy().ServeHTTP(w, r)
+	policy.Release(endpoint)
 
 	if att.failed {
 		g.health.Fail(endpoint.Addr)
@@ -91,25 +94,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	return nil
 }
 
-// pick is a round-robin over healthy endpoints. Weighted and sticky policies
-// arrive with the load-balancing milestone; keeping one implementation here
-// means the proxy path is already exercised end to end.
-func (g *gateway) pick(service string) (registry.Endpoint, bool) {
+// policyFor falls back to weighted round robin; unknown names are rejected at
+// start-up, so a fallback here only guards against an empty policy field.
+func (g *gateway) policyFor(name string) lb.Policy {
+	if p, ok := g.policies[name]; ok {
+		return p
+	}
+	return g.policies[lb.WeightedRoundRobin]
+}
+
+// pick filters the candidate set (health first) and defers the choice to the
+// route's policy.
+func (g *gateway) pick(policy lb.Policy, service, key string) (registry.Endpoint, bool) {
 	endpoints := g.reg.Resolve(service)
 	if len(endpoints) == 0 {
 		return registry.Endpoint{}, false
 	}
-	healthy := make([]registry.Endpoint, 0, len(endpoints))
+	candidates := make([]registry.Endpoint, 0, len(endpoints))
 	for _, ep := range endpoints {
 		if ep.Healthy && g.health.Available(ep.Addr) {
-			healthy = append(healthy, ep)
+			candidates = append(candidates, ep)
 		}
 	}
-	if len(healthy) == 0 {
-		return registry.Endpoint{}, false
+	return policy.Pick(candidates, key)
+}
+
+// stickyKey keeps a client on the same upstream across reconnects. Without
+// authentication the client address is the only stable, non-spoofable value.
+func stickyKey(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
-	next := g.rr.Add(1) - 1
-	return healthy[next%uint64(len(healthy))], true
+	return host
 }
 
 var sharedProxy *httputil.ReverseProxy

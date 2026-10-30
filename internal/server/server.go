@@ -17,6 +17,7 @@ import (
 	_ "github.com/caddyserver/caddy/v2/modules/caddytls"
 
 	"github.com/maxid/gfluxy/internal/config"
+	"github.com/maxid/gfluxy/internal/lb"
 	"github.com/maxid/gfluxy/internal/registry"
 	"github.com/maxid/gfluxy/internal/registry/health"
 	"github.com/maxid/gfluxy/internal/registry/nacos"
@@ -49,10 +50,16 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, err
 	}
 
+	policies, err := buildPolicies()
+	if err != nil {
+		return nil, err
+	}
+
 	active.Store(&gateway{
-		table:  routes,
-		reg:    reg,
-		health: health.New(3, 30*time.Second),
+		table:    routes,
+		reg:      reg,
+		health:   health.New(3, 30*time.Second),
+		policies: policies,
 	})
 	return &Server{doc: doc, reg: reg, closers: closers}, nil
 }
@@ -85,6 +92,9 @@ func (s *Server) Stop() error {
 func compileRoutes(in []config.Route) (*route.Table, error) {
 	routes := make([]route.Route, 0, len(in))
 	for _, rt := range in {
+		if _, err := lb.New(rt.Policy); err != nil {
+			return nil, fmt.Errorf("route %s: %w", rt.PathPrefix, err)
+		}
 		routes = append(routes, route.Route{
 			Host:        rt.Host,
 			PathPrefix:  rt.PathPrefix,
@@ -134,6 +144,20 @@ func buildRegistry(cfg *config.Config, routes []config.Route) (registry.Registry
 	default:
 		return nil, nil, fmt.Errorf("registry.type %q: unsupported", cfg.Registry.Type)
 	}
+}
+
+// buildPolicies instantiates one policy per configured name and rejects
+// unknown names at start-up rather than silently falling back.
+func buildPolicies() (map[string]lb.Policy, error) {
+	policies := make(map[string]lb.Policy, 4)
+	for _, name := range []string{"", lb.WeightedRoundRobin, lb.LeastConnections, lb.Hash} {
+		policy, err := lb.New(name)
+		if err != nil {
+			return nil, err
+		}
+		policies[name] = policy
+	}
+	return policies, nil
 }
 
 func referencedServices(routes []config.Route) []string {
