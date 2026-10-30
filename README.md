@@ -2,7 +2,7 @@
 
 北向流量网关：**一个端口**承接 HTTP/1.1、HTTP/2、HTTP/3 与 WebSocket，按冻结的 `/api/*` 前缀路由，上游由注册中心（静态文件 / Nacos）提供，流量可按请求头、租户、百分比灰度分流。
 
-> 独立产品，**不是** xdmp-go 的子模块；XDMP 只是它的第一个消费方。与 nginx / Traefik / k8s gateway / ingress 并存：边缘负责 TLS 终止与南北向终结点，gfluxy 负责服务发现式路由与灰度。
+> 独立中间件：不绑定任何特定业务平台，文档与示例只使用中性业务名。与 nginx / Traefik / k8s gateway / ingress 并存：边缘负责 TLS 终止，gfluxy 负责服务发现式路由与灰度。
 
 ## 状态
 
@@ -17,10 +17,10 @@ make build
 
 ```bash
 # 业务请求（前端路径 → 后端裸路径）
-curl -k https://127.0.0.1:8443/api/system/users
+curl -k https://127.0.0.1:8443/api/catalog/items
 
 # 灰度：带头走金丝雀，响应里有 X-Gfluxy-Gray
-curl -k -H 'X-Gray: 1' https://127.0.0.1:8443/api/system/users -i | grep X-Gfluxy-Gray
+curl -k -H 'X-Gray: 1' https://127.0.0.1:8443/api/catalog/items -i | grep X-Gfluxy-Gray
 
 # 控制面
 curl http://127.0.0.1:9000/v1/status

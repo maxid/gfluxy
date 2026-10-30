@@ -98,8 +98,8 @@ func firstMatch(routes []Route, path string) (Route, bool) {
 	return Route{}, false
 }
 
-// HasPrefix treats the prefix as a path boundary: /api/system/ matches
-// /api/system/users but not /api/systemd, and matches /api/system itself.
+// HasPrefix treats the prefix as a path boundary: /api/catalog/ matches
+// /api/catalog/items but not /api/catalogd, and matches /api/catalog itself.
 func HasPrefix(path, prefix string) bool {
 	if prefix == "/" {
 		return true

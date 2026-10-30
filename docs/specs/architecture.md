@@ -115,8 +115,8 @@ type Rule struct {
 | 反代位置 | gfluxy 自己的 handler 用 `httputil.ReverseProxy` | 用 Caddy `reverse_proxy` + 自定义 upstream/policy 模块 | 后者的上游列表在配置加载期固化，规则热更新要触发 Caddy 重载，与「不重载」约束冲突 |
 | 配置生效 | 全量文档原子替换 | 逐资源 CRUD、Caddy admin API reload | 灰度有顺序语义，逐条改会出现中间态与部分生效 |
 | Nacos 耦合度 | 只取实例与健康，元数据归一化为 `LabelSet`；发布态由控制面写入 | 直接读 `metadata.version` 做灰度 | 换注册中心或改元数据键名时，灰度规则不该跟着改 |
-| 租户来源 | Host 域名推断（精确映射 → `{code}.{base-domain}` → 最左标签），可配 | 读 `X-Tenant-Id` 头、解析 token | 前两者一个可伪造、一个要鉴权；Java 侧该头本就只限根租户运营方使用 |
-| WebSocket | 隧道：101 之后字节透传（`ReverseProxy` 自带） | 用 gnety 终结再转发 | 终结会丢 `permessage-deflate` 与任意 101 头，且要自带监听器；隧道保留 subprotocol/扩展协商，`tunnel_test.go` 已钉住 |
+| 租户来源 | Host 域名推断（精确映射 → `{code}.{base-domain}` → 最左标签），可配 | 读 `X-Tenant-Id` 头、解析 token | 前者客户端可伪造，后者需要鉴权；网关两样都不做，所以只认不可伪造的 Host |
+| WebSocket | 隧道：101 之后字节透传（`ReverseProxy` 自带） | 用第三方 WS 库终结再转发 | 终结会丢 `permessage-deflate` 与任意 101 头，且要自带监听器；隧道保留 subprotocol/扩展协商，`tunnel_test.go` 已钉住 |
 | 灰度哈希 | `hash(route+hashKey) mod 10000`，与实例无关 | 随机数、按实例列表取模 | 前者保证同键不反转、加实例不重排 |
 
 ## 配置示例
@@ -133,7 +133,7 @@ registry:
   type: nacos
   nacos:
     servers: ["127.0.0.1:8848"]
-    namespace: xdmp
+    namespace: dev
     group: DEV_GROUP
 tenant:
   source: host              # host | header
@@ -147,7 +147,7 @@ tenant_header: X-Tenant-Id
 
 ```yaml
 routes:
-  - path_prefix: /api/system/
+  - path_prefix: /api/catalog/
     strip_prefix: 2
     service: admin
     policy: wrr
@@ -159,10 +159,10 @@ routes:
         target: {version: "1.1.0"}
       - percent: 10
         target: {version: "1.1.0"}
-  - path_prefix: /api/iot/
+  - path_prefix: /api/orders/
     strip_prefix: 2
     service: iot
-  - path_prefix: /api/passport/
+  - path_prefix: /api/auth/
     strip_prefix: 1
     service: iam
 ```

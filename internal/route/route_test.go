@@ -19,33 +19,33 @@ func compile(t *testing.T, routes ...route.Route) *route.Table {
 func TestMatchLongestPrefixWins(t *testing.T) {
 	table := compile(t,
 		route.Route{PathPrefix: "/api/", StripPrefix: 1, Service: "legacy"},
-		route.Route{PathPrefix: "/api/system/", StripPrefix: 2, Service: "admin"},
+		route.Route{PathPrefix: "/api/catalog/", StripPrefix: 2, Service: "catalog"},
 	)
 
-	rt, path, ok := table.Match("example.com", "/api/system/users")
+	rt, path, ok := table.Match("example.com", "/api/catalog/items")
 	if !ok {
 		t.Fatal("no match")
 	}
-	if rt.Service != "admin" {
-		t.Errorf("service = %q, want admin", rt.Service)
+	if rt.Service != "catalog" {
+		t.Errorf("service = %q, want catalog", rt.Service)
 	}
-	if path != "/users" {
-		t.Errorf("path = %q, want /users", path)
+	if path != "/items" {
+		t.Errorf("path = %q, want /items", path)
 	}
 }
 
-func TestMatchFrozenPrefixes(t *testing.T) {
+func TestMatchAPIPrefixes(t *testing.T) {
 	table := compile(t,
-		route.Route{PathPrefix: "/api/system/", StripPrefix: 2, Service: "admin"},
-		route.Route{PathPrefix: "/api/iot/", StripPrefix: 2, Service: "iot"},
-		route.Route{PathPrefix: "/api/passport/", StripPrefix: 1, Service: "iam"},
+		route.Route{PathPrefix: "/api/catalog/", StripPrefix: 2, Service: "catalog"},
+		route.Route{PathPrefix: "/api/orders/", StripPrefix: 2, Service: "orders"},
+		route.Route{PathPrefix: "/api/auth/", StripPrefix: 1, Service: "auth"},
 	)
 
 	cases := []struct{ in, service, want string }{
-		{"/api/system/users", "admin", "/users"},
-		{"/api/iot/devices/page", "iot", "/devices/page"},
-		{"/api/passport/login", "iam", "/passport/login"},
-		{"/api/system", "admin", "/"},
+		{"/api/catalog/items", "catalog", "/items"},
+		{"/api/orders/page", "orders", "/page"},
+		{"/api/auth/login", "auth", "/auth/login"},
+		{"/api/catalog", "catalog", "/"},
 	}
 	for _, tc := range cases {
 		rt, path, ok := table.Match("localhost:8443", tc.in)
@@ -59,13 +59,13 @@ func TestMatchFrozenPrefixes(t *testing.T) {
 }
 
 func TestPrefixIsPathBoundary(t *testing.T) {
-	table := compile(t, route.Route{PathPrefix: "/api/system/", StripPrefix: 2, Service: "admin"})
+	table := compile(t, route.Route{PathPrefix: "/api/catalog/", StripPrefix: 2, Service: "catalog"})
 
-	if _, _, ok := table.Match("localhost", "/api/systemd/users"); ok {
-		t.Error("/api/systemd must not match /api/system/")
+	if _, _, ok := table.Match("localhost", "/api/catalogd/users"); ok {
+		t.Error("/api/catalogd must not match /api/catalog/")
 	}
-	if _, _, ok := table.Match("localhost", "/api/system/users"); !ok {
-		t.Error("/api/system/users must match")
+	if _, _, ok := table.Match("localhost", "/api/catalog/items"); !ok {
+		t.Error("/api/catalog/users must match")
 	}
 }
 
@@ -85,8 +85,8 @@ func TestHostSpecificBeatsWildcard(t *testing.T) {
 
 func TestCompileRejectsBadRoutes(t *testing.T) {
 	cases := []route.Route{
-		{PathPrefix: "api/system", Service: "admin"},
-		{PathPrefix: "/api/", StripPrefix: -1, Service: "admin"},
+		{PathPrefix: "api/system", Service: "catalog"},
+		{PathPrefix: "/api/", StripPrefix: -1, Service: "catalog"},
 		{PathPrefix: "/api/"},
 	}
 	for _, rt := range cases {
@@ -102,9 +102,9 @@ func TestStrip(t *testing.T) {
 		n    int
 		want string
 	}{
-		{"/api/system/users", 2, "/users"},
-		{"/api/passport/login", 1, "/passport/login"},
-		{"/api/system", 2, "/"},
+		{"/api/catalog/items", 2, "/items"},
+		{"/api/auth/login", 1, "/auth/login"},
+		{"/api/catalog", 2, "/"},
 		{"/a/b/c", 0, "/a/b/c"},
 		{"/a", 3, "/"},
 	}

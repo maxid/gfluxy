@@ -18,8 +18,8 @@ admin:
 
 tenant:
   # Tenants come from the host name, because the gateway does not parse tokens.
-  # `X-Tenant-Id` is forwarded to the backend but never used for gray routing:
-  # in XDMP only a root-operator token may set it.
+  # A tenant header is forwarded to the backend but never used for gray routing:
+  # it is client-supplied, so using it would let callers pick their own group.
   source: host
   base_domain: example.com
   exact:
@@ -29,9 +29,9 @@ registry:
   type: static # static | nacos
   static:
     services:
-      admin:
+      catalog:
         - addr: "127.0.0.1:18081"
-      iot:
+      orders:
         - addr: "127.0.0.1:18082"
           labels: { version: "1.0.0", color: stable }
         - addr: "127.0.0.1:18092"
@@ -39,9 +39,9 @@ registry:
 
 routes:
   # The frontend calls /api/*, the backends keep bare paths.
-  - path_prefix: /api/system/
+  - path_prefix: /api/catalog/
     strip_prefix: 2
-    service: admin
+    service: catalog
     policy: wrr
     gray:
       - match_header: X-Gray
@@ -52,11 +52,11 @@ routes:
       - percent: 10
         target: { version: "1.1.0" }
 
-  - path_prefix: /api/iot/
+  - path_prefix: /api/orders/
     strip_prefix: 2
-    service: iot
+    service: orders
     policy: hash # keeps a client on one instance across reconnects
 
-  - path_prefix: /api/passport/
+  - path_prefix: /api/auth/
     strip_prefix: 1
     service: admin

@@ -30,7 +30,7 @@ import (
 )
 
 // TestDataPlane drives the whole request path against a real listener: one
-// address serves h1, h2 and h3, `/api/system/*` is stripped before reaching
+// address serves h1, h2 and h3, `/api/catalog/*` is stripped before reaching
 // the upstream, WebSocket upgrades tunnel, and unknown paths 404.
 //
 // Caddy keeps process-global state, so everything lives in one test.
@@ -50,7 +50,7 @@ func TestDataPlane(t *testing.T) {
 		Registry: config.Registry{
 			Type: "static",
 			Static: config.StaticRegistry{Services: map[string][]config.Endpoint{
-				"admin": {
+				"catalog": {
 					{Addr: strings.TrimPrefix(stable.URL, "http://")},
 					{
 						Addr:   strings.TrimPrefix(canaryUpstream.URL, "http://"),
@@ -60,9 +60,9 @@ func TestDataPlane(t *testing.T) {
 			}},
 		},
 		Routes: []config.Route{{
-			PathPrefix:  "/api/system/",
+			PathPrefix:  "/api/catalog/",
 			StripPrefix: 2,
-			Service:     "admin",
+			Service:     "catalog",
 			Gray: []config.GrayRule{
 				{MatchHeader: "X-Gray", MatchValue: "1", Target: map[string]string{"version": "1.1.0"}},
 			},
@@ -87,7 +87,7 @@ func TestDataPlane(t *testing.T) {
 	waitReady(t, addr)
 
 	tlsCfg := &tls.Config{InsecureSkipVerify: true, ServerName: "localhost"} //nolint:gosec // self-signed test cert
-	url := "https://" + addr + "/api/system/users"
+	url := "https://" + addr + "/api/catalog/items"
 
 	protocols := []struct {
 		name string
@@ -124,11 +124,11 @@ func TestDataPlane(t *testing.T) {
 			if resp.Proto != tc.want {
 				t.Errorf("client negotiated %q, want %q", resp.Proto, tc.want)
 			}
-			if got["path"] != "/users" {
-				t.Errorf("upstream path = %q, want /users", got["path"])
+			if got["path"] != "/items" {
+				t.Errorf("upstream path = %q, want /items", got["path"])
 			}
-			if got["route"] != "admin:/api/system/" {
-				t.Errorf("route header = %q, want admin:/api/system/", got["route"])
+			if got["route"] != "catalog:/api/catalog/" {
+				t.Errorf("route header = %q, want catalog:/api/catalog/", got["route"])
 			}
 		})
 	}
@@ -179,7 +179,7 @@ func TestDataPlane(t *testing.T) {
 			TLSClientConfig:  tlsCfg,
 			HandshakeTimeout: 5 * time.Second,
 		}
-		conn, _, err := dialer.Dial("wss://"+addr+"/api/system/ws", nil)
+		conn, _, err := dialer.Dial("wss://"+addr+"/api/catalog/ws", nil)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}

@@ -1,10 +1,10 @@
 // Copyright 2026 The gfluxy Authors.
 //
-// Package tenant derives the tenant code from the request. XDMP resolves the
-// tenant from the token; a gateway that does not authenticate cannot, so the
-// host name is the only trustworthy source here. The `X-Tenant-Id` header is
-// passed through untouched but never used for routing decisions: only root
-// operators may send it, and deciding that needs the token.
+// Package tenant derives the tenant code from the request. Backends usually
+// resolve the tenant from the token; a gateway that does not authenticate
+// cannot, so the host name is the only trustworthy source here. A tenant
+// header is passed through untouched but never used for routing decisions:
+// it is client-supplied, and validating it needs the token.
 package tenant
 
 import (

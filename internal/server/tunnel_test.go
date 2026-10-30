@@ -59,13 +59,13 @@ func TestWebSocketTunnelKeepsNegotiation(t *testing.T) {
 		Registry: config.Registry{
 			Type: "static",
 			Static: config.StaticRegistry{Services: map[string][]config.Endpoint{
-				"admin": {{Addr: strings.TrimPrefix(upstream.URL, "http://")}},
+				"catalog": {{Addr: strings.TrimPrefix(upstream.URL, "http://")}},
 			}},
 		},
 		Routes: []config.Route{{
-			PathPrefix:  "/api/system/",
+			PathPrefix:  "/api/catalog/",
 			StripPrefix: 2,
-			Service:     "admin",
+			Service:     "catalog",
 		}},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -88,7 +88,7 @@ func TestWebSocketTunnelKeepsNegotiation(t *testing.T) {
 		EnableCompression: true,
 		HandshakeTimeout:  5 * time.Second,
 	}
-	conn, resp, err := dialer.Dial("wss://"+addr+"/api/system/ws", nil)
+	conn, resp, err := dialer.Dial("wss://"+addr+"/api/catalog/ws", nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

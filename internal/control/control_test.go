@@ -36,14 +36,14 @@ func TestHotUpdateAppliesAtomically(t *testing.T) {
 		Registry: config.Registry{
 			Type: "static",
 			Static: config.StaticRegistry{Services: map[string][]config.Endpoint{
-				"admin": {{Addr: strings.TrimPrefix(stable.URL, "http://")}},
-				"iot":   {{Addr: strings.TrimPrefix(canary.URL, "http://")}},
+				"catalog": {{Addr: strings.TrimPrefix(stable.URL, "http://")}},
+				"orders":  {{Addr: strings.TrimPrefix(canary.URL, "http://")}},
 			}},
 		},
 		Routes: []config.Route{{
-			PathPrefix:  "/api/system/",
+			PathPrefix:  "/api/catalog/",
 			StripPrefix: 2,
-			Service:     "admin",
+			Service:     "catalog",
 		}},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -67,16 +67,16 @@ func TestHotUpdateAppliesAtomically(t *testing.T) {
 
 	waitReady(t, dataAddr)
 
-	dataURL := "http://" + dataAddr + "/api/system/users"
+	dataURL := "http://" + dataAddr + "/api/catalog/users"
 	if got := upstreamOf(t, dataURL); got != "stable" {
 		t.Fatalf("initial upstream = %q, want stable", got)
 	}
 
 	// Re-point the same prefix at the canary upstream.
 	putConfig(t, adminAddr, `routes:
-  - path_prefix: /api/system/
+  - path_prefix: /api/catalog/
     strip_prefix: 2
-    service: iot
+    service: orders
 `, http.StatusOK)
 
 	if got := upstreamOf(t, dataURL); got != "canary" {
@@ -88,7 +88,7 @@ func TestHotUpdateAppliesAtomically(t *testing.T) {
 
 	// A route to a service the registry does not know must be rejected.
 	putConfig(t, adminAddr, `routes:
-  - path_prefix: /api/system/
+  - path_prefix: /api/catalog/
     strip_prefix: 2
     service: does-not-exist
 `, http.StatusUnprocessableEntity)
