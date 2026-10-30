@@ -2,11 +2,13 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/maxid/gfluxy/internal/canary"
 	"github.com/maxid/gfluxy/internal/lb"
+	"github.com/maxid/gfluxy/internal/obs"
 	"github.com/maxid/gfluxy/internal/registry"
 	"github.com/maxid/gfluxy/internal/registry/health"
 	"github.com/maxid/gfluxy/internal/route"
@@ -41,7 +44,10 @@ type targetKey struct{}
 
 // attempt carries per-request failure state from the proxy back to the
 // handler, which is where health accounting happens.
-type attempt struct{ failed bool }
+type attempt struct {
+	failed bool
+	err    string
+}
 
 type attemptKey struct{}
 
@@ -68,6 +74,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 
 	rt, path, ok := g.table.Match(r.Host, r.URL.Path)
 	if !ok {
+		obs.Log(obs.Event{Proto: r.Proto, Method: r.Method, Host: r.Host, Path: r.URL.Path, Status: http.StatusNotFound})
 		writeError(w, http.StatusNotFound, "no route")
 		return nil
 	}
@@ -95,14 +102,37 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	r.URL.RawPath = ""
 	r.Header.Set("X-Gfluxy-Route", rt.Service+":"+rt.PathPrefix)
 
-	proxy().ServeHTTP(w, r)
+	start := time.Now()
+	rec := &recorder{ResponseWriter: w}
+	proxy().ServeHTTP(rec, r)
 	policy.Release(endpoint)
 
 	if att.failed {
 		g.health.Fail(endpoint.Addr)
+		obs.UpstreamFailures.WithLabelValues(rt.Service, endpoint.Addr).Inc()
 	} else {
 		g.health.Succeed(endpoint.Addr)
 	}
+
+	routeLabel := rt.PathPrefix
+	obs.Requests.WithLabelValues(routeLabel, rt.Service, statusLabel(rec.status)).Inc()
+	if grayLabel := w.Header().Get("X-Gfluxy-Gray"); grayLabel != "" {
+		obs.GrayHits.WithLabelValues(routeLabel, grayLabel).Inc()
+	}
+	obs.Log(obs.Event{
+		Proto:    r.Proto,
+		Method:   r.Method,
+		Host:     r.Host,
+		Path:     r.URL.Path,
+		Route:    routeLabel,
+		Service:  rt.Service,
+		Upstream: endpoint.Addr,
+		Gray:     w.Header().Get("X-Gfluxy-Gray"),
+		Status:   rec.statusOrOK(),
+		Bytes:    rec.bytes,
+		Millis:   time.Since(start).Milliseconds(),
+		Error:    att.err,
+	})
 	return nil
 }
 
@@ -207,9 +237,56 @@ func newTransport() *http.Transport {
 func proxyError(w http.ResponseWriter, r *http.Request, err error) {
 	if att, ok := r.Context().Value(attemptKey{}).(*attempt); ok {
 		att.failed = true
+		att.err = err.Error()
 	}
 	writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 }
+
+// recorder captures the status and size for the access log and metrics while
+// staying transparent to the proxy: Unwrap keeps http.ResponseController and
+// Hijack keep WebSocket tunnelling working.
+type recorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (r *recorder) WriteHeader(code int) {
+	if r.status == 0 {
+		r.status = code
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *recorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	n, err := r.ResponseWriter.Write(b)
+	r.bytes += int64(n)
+	return n, err
+}
+
+func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+func (r *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	// Caddy's writer reaches Hijack through Unwrap, not through a direct type
+	// assertion, so go via the controller instead of asserting http.Hijacker.
+	conn, brw, err := http.NewResponseController(r.ResponseWriter).Hijack()
+	if err == nil && r.status == 0 {
+		r.status = http.StatusSwitchingProtocols
+	}
+	return conn, brw, err
+}
+
+func (r *recorder) statusOrOK() int {
+	if r.status == 0 {
+		return http.StatusOK
+	}
+	return r.status
+}
+
+func statusLabel(status int) string { return strconv.Itoa(status) }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")

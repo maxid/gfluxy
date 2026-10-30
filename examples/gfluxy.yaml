@@ -1,0 +1,62 @@
+# Start-up configuration for gfluxy.
+#
+# Everything here is read once, at boot. Routes and gray rules can also be
+# replaced at runtime with `PUT /v1/config` — the document below is simply the
+# bootstrap version.
+listen:
+  # One address for HTTP/1.1, HTTP/2 and HTTP/3. With `tls` set, Caddy binds
+  # the same port number on UDP for QUIC; without it only h1/h2 are served.
+  addr: ":8443"
+  tls:
+    cert_file: /etc/gfluxy/tls.crt
+    key_file: /etc/gfluxy/tls.key
+
+admin:
+  # Control plane and metrics. Never expose this: writing here changes routing
+  # without authentication.
+  addr: "127.0.0.1:9000"
+
+tenant:
+  # Tenants come from the host name, because the gateway does not parse tokens.
+  # `X-Tenant-Id` is forwarded to the backend but never used for gray routing:
+  # in XDMP only a root-operator token may set it.
+  source: host
+  base_domain: example.com
+  exact:
+    "admin.example.com": management
+
+registry:
+  type: static # static | nacos
+  static:
+    services:
+      admin:
+        - addr: "127.0.0.1:18081"
+      iot:
+        - addr: "127.0.0.1:18082"
+          labels: { version: "1.0.0", color: stable }
+        - addr: "127.0.0.1:18092"
+          labels: { version: "1.1.0", color: canary }
+
+routes:
+  # The frontend calls /api/*, the backends keep bare paths.
+  - path_prefix: /api/system/
+    strip_prefix: 2
+    service: admin
+    policy: wrr
+    gray:
+      - match_header: X-Gray
+        match_value: "1"
+        target: { version: "1.1.0" }
+      - match_tenant: tenant-a
+        target: { version: "1.1.0" }
+      - percent: 10
+        target: { version: "1.1.0" }
+
+  - path_prefix: /api/iot/
+    strip_prefix: 2
+    service: iot
+    policy: hash # keeps a client on one instance across reconnects
+
+  - path_prefix: /api/passport/
+    strip_prefix: 1
+    service: admin

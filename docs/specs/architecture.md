@@ -2,7 +2,7 @@
 id: architecture
 type: architecture-design
 title: gfluxy 架构与模块边界
-status: draft
+status: active
 parent: goal
 ---
 

@@ -2,7 +2,7 @@
 id: goal
 type: goal-and-requirements
 title: gfluxy — 北向流量网关（目标与需求）
-status: draft
+status: active
 ---
 
 # gfluxy — 北向流量网关

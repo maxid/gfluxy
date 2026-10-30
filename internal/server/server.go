@@ -20,6 +20,7 @@ import (
 	"github.com/maxid/gfluxy/internal/canary"
 	"github.com/maxid/gfluxy/internal/config"
 	"github.com/maxid/gfluxy/internal/lb"
+	"github.com/maxid/gfluxy/internal/obs"
 	"github.com/maxid/gfluxy/internal/registry"
 	"github.com/maxid/gfluxy/internal/registry/health"
 	"github.com/maxid/gfluxy/internal/registry/nacos"
@@ -75,6 +76,7 @@ func New(cfg *config.Config) (*Server, error) {
 	copy(stored, cfg.Routes)
 	appliedRoutes.Store(&stored)
 	configVersion.Store(1) // the start-up document is version 1
+	obs.ConfigVersion.Set(1)
 	return &Server{doc: doc, reg: reg, closers: closers}, nil
 }
 
@@ -142,7 +144,9 @@ func ApplyRoutes(routes []config.Route) (uint64, error) {
 	copy(stored, routes)
 	appliedRoutes.Store(&stored)
 
-	return configVersion.Add(1), nil
+	version := configVersion.Add(1)
+	obs.ConfigVersion.Set(float64(version))
+	return version, nil
 }
 
 // CurrentRoutes returns the document currently in force.

@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/maxid/gfluxy/internal/config"
+	"github.com/maxid/gfluxy/internal/obs"
 	"github.com/maxid/gfluxy/internal/server"
 )
 
@@ -43,6 +44,7 @@ func New(addr string) *Server {
 	mux.HandleFunc("/v1/config", s.handleConfig)
 	mux.HandleFunc("/v1/validate", s.handleValidate)
 	mux.HandleFunc("/v1/status", s.handleStatus)
+	mux.Handle("/metrics", obs.MetricsHandler())
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
 	s.srv = &http.Server{
