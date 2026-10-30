@@ -76,6 +76,22 @@ func Bucket(route, key string) int {
 	return int(fnv64a(route+"|"+key) % 10000)
 }
 
+// Keep reports whether an endpoint may serve a request. With a target, the
+// endpoint must carry every target label. Without one, the endpoint must not
+// belong to any canary group: the stable set is "everything the rules do not
+// claim", so operators do not have to label stable instances explicitly.
+func (d Decider) Keep(endpoint registry.Endpoint, target registry.LabelSet) bool {
+	if target != nil {
+		return Matches(endpoint, target)
+	}
+	for _, rule := range d.rules {
+		if len(rule.Target) > 0 && Matches(endpoint, rule.Target) {
+			return false
+		}
+	}
+	return true
+}
+
 // Matches reports whether an endpoint carries every label the target asks for.
 // A nil target matches everything.
 func Matches(endpoint registry.Endpoint, target registry.LabelSet) bool {

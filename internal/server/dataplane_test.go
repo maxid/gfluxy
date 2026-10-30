@@ -35,8 +35,10 @@ import (
 //
 // Caddy keeps process-global state, so everything lives in one test.
 func TestDataPlane(t *testing.T) {
-	upstream := newUpstream(t)
-	defer upstream.Close()
+	stable := newUpstream(t, "stable")
+	defer stable.Close()
+	canaryUpstream := newUpstream(t, "canary")
+	defer canaryUpstream.Close()
 
 	certFile, keyFile := selfSigned(t)
 	addr := freeAddr(t)
@@ -47,13 +49,22 @@ func TestDataPlane(t *testing.T) {
 		Registry: config.Registry{
 			Type: "static",
 			Static: config.StaticRegistry{Services: map[string][]config.Endpoint{
-				"admin": {{Addr: strings.TrimPrefix(upstream.URL, "http://")}},
+				"admin": {
+					{Addr: strings.TrimPrefix(stable.URL, "http://")},
+					{
+						Addr:   strings.TrimPrefix(canaryUpstream.URL, "http://"),
+						Labels: map[string]string{"version": "1.1.0"},
+					},
+				},
 			}},
 		},
 		Routes: []config.Route{{
 			PathPrefix:  "/api/system/",
 			StripPrefix: 2,
 			Service:     "admin",
+			Gray: []config.GrayRule{
+				{MatchHeader: "X-Gray", MatchValue: "1", Target: map[string]string{"version": "1.1.0"}},
+			},
 		}},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -121,6 +132,47 @@ func TestDataPlane(t *testing.T) {
 		})
 	}
 
+	t.Run("gray by header", func(t *testing.T) {
+		client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req.Header.Set("X-Gray", "1")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		defer resp.Body.Close()
+
+		var got map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got["upstream"] != "canary" {
+			t.Fatalf("upstream = %q, want canary", got["upstream"])
+		}
+		if resp.Header.Get("X-Gfluxy-Gray") != "version=1.1.0" {
+			t.Errorf("gray header = %q, want version=1.1.0", resp.Header.Get("X-Gfluxy-Gray"))
+		}
+	})
+
+	t.Run("stable stays off the canary", func(t *testing.T) {
+		client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+		for i := 0; i < 8; i++ {
+			resp, err := client.Get(url)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			var got map[string]string
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				resp.Body.Close()
+				t.Fatalf("decode: %v", err)
+			}
+			resp.Body.Close()
+			if got["upstream"] != "stable" {
+				t.Fatalf("request %d hit %q, want stable", i, got["upstream"])
+			}
+		}
+	})
+
 	t.Run("websocket", func(t *testing.T) {
 		dialer := websocket.Dialer{
 			TLSClientConfig:  tlsCfg,
@@ -159,7 +211,7 @@ func TestDataPlane(t *testing.T) {
 	})
 }
 
-func newUpstream(t *testing.T) *httptest.Server {
+func newUpstream(t *testing.T, name string) *httptest.Server {
 	t.Helper()
 	upgrader := websocket.Upgrader{}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -182,9 +234,10 @@ func newUpstream(t *testing.T) *httptest.Server {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"proto": r.Proto,
-			"path":  r.URL.Path,
-			"route": r.Header.Get("X-Gfluxy-Route"),
+			"proto":    r.Proto,
+			"path":     r.URL.Path,
+			"route":    r.Header.Get("X-Gfluxy-Route"),
+			"upstream": name,
 		})
 	}))
 }

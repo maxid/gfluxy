@@ -7,16 +7,19 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 
+	"github.com/maxid/gfluxy/internal/canary"
 	"github.com/maxid/gfluxy/internal/lb"
 	"github.com/maxid/gfluxy/internal/registry"
 	"github.com/maxid/gfluxy/internal/registry/health"
 	"github.com/maxid/gfluxy/internal/route"
+	"github.com/maxid/gfluxy/internal/tenant"
 )
 
 const handlerName = "gfluxy"
@@ -28,6 +31,7 @@ type gateway struct {
 	reg      registry.Registry
 	health   *health.Tracker
 	policies map[string]lb.Policy
+	tenant   tenant.Resolver
 }
 
 var active atomic.Pointer[gateway]
@@ -67,8 +71,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		return nil
 	}
 
+	key := stickyKey(r)
+	tenantCode := g.tenant.Resolve(r.Host, r.Header)
+	target := rt.Gray.Decide(rt.PathPrefix, r.Header, tenantCode, key)
+	if target != nil {
+		w.Header().Set("X-Gfluxy-Gray", labels(target))
+	}
+
 	policy := g.policyFor(rt.Policy)
-	endpoint, ok := g.pick(policy, rt.Service, stickyKey(r))
+	endpoint, ok := g.pick(policy, rt.Service, key, rt.Gray, target)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "no healthy upstream for "+rt.Service)
 		return nil
@@ -105,18 +116,33 @@ func (g *gateway) policyFor(name string) lb.Policy {
 
 // pick filters the candidate set (health first) and defers the choice to the
 // route's policy.
-func (g *gateway) pick(policy lb.Policy, service, key string) (registry.Endpoint, bool) {
+func (g *gateway) pick(policy lb.Policy, service, key string, gray canary.Decider, target registry.LabelSet) (registry.Endpoint, bool) {
 	endpoints := g.reg.Resolve(service)
 	if len(endpoints) == 0 {
 		return registry.Endpoint{}, false
 	}
 	candidates := make([]registry.Endpoint, 0, len(endpoints))
 	for _, ep := range endpoints {
-		if ep.Healthy && g.health.Available(ep.Addr) {
-			candidates = append(candidates, ep)
+		if !ep.Healthy || !g.health.Available(ep.Addr) || !gray.Keep(ep, target) {
+			continue
 		}
+		candidates = append(candidates, ep)
 	}
 	return policy.Pick(candidates, key)
+}
+
+// labels renders a target label set for the diagnostic response header.
+func labels(target registry.LabelSet) string {
+	if len(target) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(target))
+	for _, key := range []string{registry.LabelVersion, registry.LabelColor, registry.LabelGroup} {
+		if v, ok := target[key]; ok {
+			parts = append(parts, key+"="+v)
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 // stickyKey keeps a client on the same upstream across reconnects. Without

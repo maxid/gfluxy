@@ -64,11 +64,21 @@ type Endpoint struct {
 
 // Route is one entry of the bootstrap routing table.
 type Route struct {
-	Host        string `yaml:"host"`
-	PathPrefix  string `yaml:"path_prefix"`
-	StripPrefix int    `yaml:"strip_prefix"`
-	Service     string `yaml:"service"`
-	Policy      string `yaml:"policy"`
+	Host        string     `yaml:"host"`
+	PathPrefix  string     `yaml:"path_prefix"`
+	StripPrefix int        `yaml:"strip_prefix"`
+	Service     string     `yaml:"service"`
+	Policy      string     `yaml:"policy"`
+	Gray        []GrayRule `yaml:"gray"`
+}
+
+// GrayRule is one ordered gray-release step of a route.
+type GrayRule struct {
+	MatchHeader string            `yaml:"match_header"`
+	MatchValue  string            `yaml:"match_value"`
+	MatchTenant string            `yaml:"match_tenant"`
+	Percent     int               `yaml:"percent"`
+	Target      map[string]string `yaml:"target"`
 }
 
 // Nacos holds the Nacos discovery settings.

@@ -16,6 +16,7 @@ import (
 	_ "github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	_ "github.com/caddyserver/caddy/v2/modules/caddytls"
 
+	"github.com/maxid/gfluxy/internal/canary"
 	"github.com/maxid/gfluxy/internal/config"
 	"github.com/maxid/gfluxy/internal/lb"
 	"github.com/maxid/gfluxy/internal/registry"
@@ -23,6 +24,7 @@ import (
 	"github.com/maxid/gfluxy/internal/registry/nacos"
 	"github.com/maxid/gfluxy/internal/registry/static"
 	"github.com/maxid/gfluxy/internal/route"
+	"github.com/maxid/gfluxy/internal/tenant"
 )
 
 // Server is a runnable data plane.
@@ -60,6 +62,12 @@ func New(cfg *config.Config) (*Server, error) {
 		reg:      reg,
 		health:   health.New(3, 30*time.Second),
 		policies: policies,
+		tenant: tenant.Resolver{
+			Source:     cfg.Tenant.Source,
+			Header:     cfg.Tenant.Header,
+			BaseDomain: cfg.Tenant.BaseDomain,
+			Exact:      cfg.Tenant.Exact,
+		},
 	})
 	return &Server{doc: doc, reg: reg, closers: closers}, nil
 }
@@ -95,12 +103,17 @@ func compileRoutes(in []config.Route) (*route.Table, error) {
 		if _, err := lb.New(rt.Policy); err != nil {
 			return nil, fmt.Errorf("route %s: %w", rt.PathPrefix, err)
 		}
+		gray, err := compileGray(rt)
+		if err != nil {
+			return nil, err
+		}
 		routes = append(routes, route.Route{
 			Host:        rt.Host,
 			PathPrefix:  rt.PathPrefix,
 			StripPrefix: rt.StripPrefix,
 			Service:     rt.Service,
 			Policy:      rt.Policy,
+			Gray:        gray,
 		})
 	}
 	table, err := route.Compile(routes)
@@ -144,6 +157,23 @@ func buildRegistry(cfg *config.Config, routes []config.Route) (registry.Registry
 	default:
 		return nil, nil, fmt.Errorf("registry.type %q: unsupported", cfg.Registry.Type)
 	}
+}
+
+func compileGray(rt config.Route) (canary.Decider, error) {
+	rules := make([]canary.Rule, 0, len(rt.Gray))
+	for _, gr := range rt.Gray {
+		if gr.Percent < 0 || gr.Percent > 100 {
+			return canary.Decider{}, fmt.Errorf("route %s: percent %d outside 0..100", rt.PathPrefix, gr.Percent)
+		}
+		rules = append(rules, canary.Rule{
+			Header:  gr.MatchHeader,
+			Value:   gr.MatchValue,
+			Tenant:  gr.MatchTenant,
+			Percent: gr.Percent,
+			Target:  registry.LabelSet(gr.Target),
+		})
+	}
+	return canary.New(rules), nil
 }
 
 // buildPolicies instantiates one policy per configured name and rejects

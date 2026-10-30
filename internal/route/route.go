@@ -10,6 +10,8 @@ import (
 	"net"
 	"sort"
 	"strings"
+
+	"github.com/maxid/gfluxy/internal/canary"
 )
 
 // Route maps an incoming request to a service.
@@ -19,6 +21,7 @@ type Route struct {
 	StripPrefix int
 	Service     string
 	Policy      string
+	Gray        canary.Decider
 }
 
 // Table is an immutable, pre-sorted routing table.
