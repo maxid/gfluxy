@@ -14,6 +14,7 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 
 	"github.com/maxid/gfluxy/internal/registry"
+	"github.com/maxid/gfluxy/internal/registry/health"
 	"github.com/maxid/gfluxy/internal/route"
 )
 
@@ -22,14 +23,21 @@ const handlerName = "gfluxy"
 // gateway is the immutable state a request reads: the routing table and the
 // registry. Replacing the pointer is the whole of a hot update.
 type gateway struct {
-	table *route.Table
-	reg   registry.Registry
-	rr    atomic.Uint64
+	table  *route.Table
+	reg    registry.Registry
+	health *health.Tracker
+	rr     atomic.Uint64
 }
 
 var active atomic.Pointer[gateway]
 
 type targetKey struct{}
+
+// attempt carries per-request failure state from the proxy back to the
+// handler, which is where health accounting happens.
+type attempt struct{ failed bool }
+
+type attemptKey struct{}
 
 // Handler is the single catch-all HTTP handler.
 type Handler struct{}
@@ -64,12 +72,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		return nil
 	}
 
-	r = r.WithContext(context.WithValue(r.Context(), targetKey{}, endpoint))
+	att := &attempt{}
+	ctx := context.WithValue(r.Context(), targetKey{}, endpoint)
+	ctx = context.WithValue(ctx, attemptKey{}, att)
+
+	r = r.WithContext(ctx)
 	r.URL.Path = path
 	r.URL.RawPath = ""
 	r.Header.Set("X-Gfluxy-Route", rt.Service+":"+rt.PathPrefix)
 
 	proxy().ServeHTTP(w, r)
+
+	if att.failed {
+		g.health.Fail(endpoint.Addr)
+	} else {
+		g.health.Succeed(endpoint.Addr)
+	}
 	return nil
 }
 
@@ -83,7 +101,7 @@ func (g *gateway) pick(service string) (registry.Endpoint, bool) {
 	}
 	healthy := make([]registry.Endpoint, 0, len(endpoints))
 	for _, ep := range endpoints {
-		if ep.Healthy {
+		if ep.Healthy && g.health.Available(ep.Addr) {
 			healthy = append(healthy, ep)
 		}
 	}
@@ -143,6 +161,9 @@ func newTransport() *http.Transport {
 }
 
 func proxyError(w http.ResponseWriter, r *http.Request, err error) {
+	if att, ok := r.Context().Value(attemptKey{}).(*attempt); ok {
+		att.failed = true
+	}
 	writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 }
 

@@ -8,8 +8,9 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+	"log"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	_ "github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -17,14 +18,17 @@ import (
 
 	"github.com/maxid/gfluxy/internal/config"
 	"github.com/maxid/gfluxy/internal/registry"
+	"github.com/maxid/gfluxy/internal/registry/health"
+	"github.com/maxid/gfluxy/internal/registry/nacos"
 	"github.com/maxid/gfluxy/internal/registry/static"
 	"github.com/maxid/gfluxy/internal/route"
 )
 
 // Server is a runnable data plane.
 type Server struct {
-	doc []byte
-	reg registry.Registry
+	doc     []byte
+	reg     registry.Registry
+	closers []func()
 }
 
 // New validates the routing table against the registry and compiles both into
@@ -40,13 +44,17 @@ func New(cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	reg, err := buildRegistry(cfg, routes)
+	reg, closers, err := buildRegistry(cfg, cfg.Routes)
 	if err != nil {
 		return nil, err
 	}
 
-	active.Store(&gateway{table: routes, reg: reg})
-	return &Server{doc: doc, reg: reg}, nil
+	active.Store(&gateway{
+		table:  routes,
+		reg:    reg,
+		health: health.New(3, 30*time.Second),
+	})
+	return &Server{doc: doc, reg: reg, closers: closers}, nil
 }
 
 // Start loads the configuration and begins serving. It returns once the
@@ -64,9 +72,14 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop drains the listener and its active connections.
+// Stop drains the listener and its active connections, then releases the
+// discovery subscriptions.
 func (s *Server) Stop() error {
-	return caddy.Stop()
+	err := caddy.Stop()
+	for _, closeFn := range s.closers {
+		closeFn()
+	}
+	return err
 }
 
 func compileRoutes(in []config.Route) (*route.Table, error) {
@@ -87,7 +100,7 @@ func compileRoutes(in []config.Route) (*route.Table, error) {
 	return table, nil
 }
 
-func buildRegistry(cfg *config.Config, table *route.Table) (registry.Registry, error) {
+func buildRegistry(cfg *config.Config, routes []config.Route) (registry.Registry, []func(), error) {
 	switch cfg.Registry.Type {
 	case "static":
 		services := make(map[string][]registry.Endpoint, len(cfg.Registry.Static.Services))
@@ -101,15 +114,39 @@ func buildRegistry(cfg *config.Config, table *route.Table) (registry.Registry, e
 			}
 		}
 		reg := static.New(services)
-		if err := checkServicesServed(cfg.Routes, reg); err != nil {
-			return nil, err
+		if err := checkServicesServed(routes, reg); err != nil {
+			return nil, nil, err
 		}
-		return reg, nil
+		return reg, nil, nil
 	case "nacos":
-		return nil, errors.New("registry.type nacos: adapter lands with the discovery milestone")
+		reg, err := nacos.New(nacos.Config{
+			Servers:   cfg.Registry.Nacos.Servers,
+			Namespace: cfg.Registry.Nacos.Namespace,
+			Group:     cfg.Registry.Nacos.Group,
+			Username:  cfg.Registry.Nacos.Username,
+			Password:  cfg.Registry.Nacos.Password,
+		}, referencedServices(routes))
+		if err != nil {
+			return nil, nil, fmt.Errorf("registry nacos: %w", err)
+		}
+		log.Printf("gfluxy: nacos discovery ready for %d services", len(referencedServices(routes)))
+		return reg, []func(){reg.Close}, nil
 	default:
-		return nil, fmt.Errorf("registry.type %q: unsupported", cfg.Registry.Type)
+		return nil, nil, fmt.Errorf("registry.type %q: unsupported", cfg.Registry.Type)
 	}
+}
+
+func referencedServices(routes []config.Route) []string {
+	seen := map[string]bool{}
+	var services []string
+	for _, rt := range routes {
+		if rt.Service == "" || seen[rt.Service] {
+			continue
+		}
+		seen[rt.Service] = true
+		services = append(services, rt.Service)
+	}
+	return services
 }
 
 func checkServicesServed(routes []config.Route, reg registry.Registry) error {
