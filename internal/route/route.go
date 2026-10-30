@@ -6,7 +6,6 @@
 package route
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -55,11 +54,6 @@ func Compile(routes []Route) (*Table, error) {
 	}
 	sortRoutes(table.any)
 
-	for _, rt := range routes {
-		if err := table.checkOverlap(rt); err != nil {
-			return nil, err
-		}
-	}
 	return table, nil
 }
 
@@ -107,32 +101,22 @@ func HasPrefix(path, prefix string) bool {
 	if prefix == "/" {
 		return true
 	}
+	if strings.HasSuffix(prefix, "/") {
+		if path == strings.TrimSuffix(prefix, "/") {
+			return true
+		}
+		return strings.HasPrefix(path, prefix)
+	}
 	if !strings.HasPrefix(path, prefix) {
 		return false
 	}
-	if strings.HasSuffix(prefix, "/") || len(path) == len(prefix) {
-		return true
-	}
-	return path[len(prefix)] == '/'
+	return len(path) == len(prefix) || path[len(prefix)] == '/'
 }
 
 func sortRoutes(routes []Route) {
 	sort.SliceStable(routes, func(i, j int) bool {
 		return len(routes[i].PathPrefix) > len(routes[j].PathPrefix)
 	})
-}
-
-func (t *Table) checkOverlap(candidate Route) error {
-	if candidate.Host == "" {
-		return nil
-	}
-	for _, existing := range t.any {
-		if existing.PathPrefix == candidate.PathPrefix {
-			return errors.New("host-specific route " + candidate.Host + candidate.PathPrefix +
-				" shadows wildcard route " + existing.PathPrefix)
-		}
-	}
-	return nil
 }
 
 func stripPort(host string) string {

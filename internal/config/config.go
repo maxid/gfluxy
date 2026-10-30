@@ -18,6 +18,7 @@ type Config struct {
 	Listen   Listen   `yaml:"listen"`
 	Tenant   Tenant   `yaml:"tenant"`
 	Registry Registry `yaml:"registry"`
+	Routes   []Route  `yaml:"routes"`
 }
 
 // Listen describes the single public listener.
@@ -43,9 +44,31 @@ type Tenant struct {
 
 // Registry selects where upstream instances come from.
 type Registry struct {
-	Type  string `yaml:"type"` // static | nacos
-	Path  string `yaml:"path"`
-	Nacos Nacos  `yaml:"nacos"`
+	Type   string         `yaml:"type"` // static | nacos
+	Path   string         `yaml:"path"`
+	Static StaticRegistry `yaml:"static"`
+	Nacos  Nacos          `yaml:"nacos"`
+}
+
+// StaticRegistry is a fixed service table.
+type StaticRegistry struct {
+	Services map[string][]Endpoint `yaml:"services"`
+}
+
+// Endpoint is one instance in the static table.
+type Endpoint struct {
+	Addr   string            `yaml:"addr"`
+	Weight int               `yaml:"weight"`
+	Labels map[string]string `yaml:"labels"`
+}
+
+// Route is one entry of the bootstrap routing table.
+type Route struct {
+	Host        string `yaml:"host"`
+	PathPrefix  string `yaml:"path_prefix"`
+	StripPrefix int    `yaml:"strip_prefix"`
+	Service     string `yaml:"service"`
+	Policy      string `yaml:"policy"`
 }
 
 // Nacos holds the Nacos discovery settings.

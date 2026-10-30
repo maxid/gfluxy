@@ -8,17 +8,20 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 
@@ -26,18 +29,33 @@ import (
 	"github.com/maxid/gfluxy/internal/server"
 )
 
-// TestSinglePortProtocols asserts the core promise of the product: one
-// address serves h1, h2 and h3. Caddy keeps global state, so this runs as a
-// single test rather than parallel cases.
-func TestSinglePortProtocols(t *testing.T) {
+// TestDataPlane drives the whole request path against a real listener: one
+// address serves h1, h2 and h3, `/api/system/*` is stripped before reaching
+// the upstream, WebSocket upgrades tunnel, and unknown paths 404.
+//
+// Caddy keeps process-global state, so everything lives in one test.
+func TestDataPlane(t *testing.T) {
+	upstream := newUpstream(t)
+	defer upstream.Close()
+
 	certFile, keyFile := selfSigned(t)
 	addr := freeAddr(t)
 
 	cfg := &config.Config{
 		Listen: config.Listen{Addr: addr, TLS: config.TLS{CertFile: certFile, KeyFile: keyFile}},
 		Tenant: config.Tenant{Source: "host"},
+		Registry: config.Registry{
+			Type: "static",
+			Static: config.StaticRegistry{Services: map[string][]config.Endpoint{
+				"admin": {{Addr: strings.TrimPrefix(upstream.URL, "http://")}},
+			}},
+		},
+		Routes: []config.Route{{
+			PathPrefix:  "/api/system/",
+			StripPrefix: 2,
+			Service:     "admin",
+		}},
 	}
-	cfg.Registry.Type = "static"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -56,10 +74,10 @@ func TestSinglePortProtocols(t *testing.T) {
 	}()
 	waitReady(t, addr)
 
-	base := "https://" + addr + "/api/system/users"
 	tlsCfg := &tls.Config{InsecureSkipVerify: true, ServerName: "localhost"} //nolint:gosec // self-signed test cert
+	url := "https://" + addr + "/api/system/users"
 
-	cases := []struct {
+	protocols := []struct {
 		name string
 		rt   http.RoundTripper
 		want string
@@ -68,28 +86,107 @@ func TestSinglePortProtocols(t *testing.T) {
 		{"h2", &http2.Transport{TLSClientConfig: tlsCfg}, "HTTP/2.0"},
 		{"h3", &http3.Transport{TLSClientConfig: tlsCfg}, "HTTP/3.0"},
 	}
-
-	for _, tc := range cases {
+	for _, tc := range protocols {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &http.Client{Transport: tc.rt, Timeout: 5 * time.Second}
-			resp, err := client.Get(base)
+			resp, err := client.Get(url)
 			if err != nil {
-				t.Fatalf("%s request: %v", tc.name, err)
+				t.Fatalf("get: %v", err)
 			}
 			defer resp.Body.Close()
 
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
-				t.Fatalf("%s read: %v", tc.name, err)
+				t.Fatalf("read: %v", err)
 			}
 			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("%s status = %d, body %s", tc.name, resp.StatusCode, body)
+				t.Fatalf("status = %d, body %s", resp.StatusCode, body)
 			}
-			if !strings.Contains(string(body), `"proto":"`+tc.want+`"`) {
-				t.Fatalf("%s negotiated %s, want %s", tc.name, body, tc.want)
+
+			var got map[string]string
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode %s: %v", body, err)
+			}
+			// The upstream is HTTP/1.1 by design; the negotiated client
+			// protocol is what the client transport reports.
+			if resp.Proto != tc.want {
+				t.Errorf("client negotiated %q, want %q", resp.Proto, tc.want)
+			}
+			if got["path"] != "/users" {
+				t.Errorf("upstream path = %q, want /users", got["path"])
+			}
+			if got["route"] != "admin:/api/system/" {
+				t.Errorf("route header = %q, want admin:/api/system/", got["route"])
 			}
 		})
 	}
+
+	t.Run("websocket", func(t *testing.T) {
+		dialer := websocket.Dialer{
+			TLSClientConfig:  tlsCfg,
+			HandshakeTimeout: 5 * time.Second,
+		}
+		conn, _, err := dialer.Dial("wss://"+addr+"/api/system/ws", nil)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatalf("deadline: %v", err)
+		}
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if string(msg) != "echo:ping" {
+			t.Errorf("message = %q, want echo:ping", msg)
+		}
+	})
+
+	t.Run("unknown path", func(t *testing.T) {
+		resp, err := (&http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}).Get("https://" + addr + "/nope")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", resp.StatusCode)
+		}
+	})
+}
+
+func newUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	upgrader := websocket.Upgrader{}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			for {
+				mt, msg, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+				if err := conn.WriteMessage(mt, append([]byte("echo:"), msg...)); err != nil {
+					return
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"proto": r.Proto,
+			"path":  r.URL.Path,
+			"route": r.Header.Get("X-Gfluxy-Route"),
+		})
+	}))
 }
 
 func freeAddr(t *testing.T) string {
