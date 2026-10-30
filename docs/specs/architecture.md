@@ -115,6 +115,7 @@ type Rule struct {
 | 反代位置 | gfluxy 自己的 handler 用 `httputil.ReverseProxy` | 用 Caddy `reverse_proxy` + 自定义 upstream/policy 模块 | 后者的上游列表在配置加载期固化，规则热更新要触发 Caddy 重载，与「不重载」约束冲突 |
 | 配置生效 | 全量文档原子替换 | 逐资源 CRUD、Caddy admin API reload | 灰度有顺序语义，逐条改会出现中间态与部分生效 |
 | Nacos 耦合度 | 只取实例与健康，元数据归一化为 `LabelSet`；发布态由控制面写入 | 直接读 `metadata.version` 做灰度 | 换注册中心或改元数据键名时，灰度规则不该跟着改 |
+| 租户来源 | Host 域名推断（精确映射 → `{code}.{base-domain}` → 最左标签），可配 | 读 `X-Tenant-Id` 头、解析 token | 前两者一个可伪造、一个要鉴权；Java 侧该头本就只限根租户运营方使用 |
 | 灰度哈希 | `hash(route+hashKey) mod 10000`，与实例无关 | 随机数、按实例列表取模 | 前者保证同键不反转、加实例不重排 |
 
 ## 配置示例
@@ -133,6 +134,11 @@ registry:
     servers: ["127.0.0.1:8848"]
     namespace: xdmp
     group: DEV_GROUP
+tenant:
+  source: host              # host | header
+  base_domain: example.com
+  exact:                    # 精确域名 → 租户编码
+    "admin.example.com": "management"
 tenant_header: X-Tenant-Id
 ```
 
