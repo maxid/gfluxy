@@ -29,3 +29,9 @@ type Endpoint struct {
 type Registry interface {
 	Resolve(service string) []Endpoint
 }
+
+// StatusReporter is implemented by registries that can lose contact with their
+// backend while still serving the last good instance list.
+type StatusReporter interface {
+	Status() error
+}

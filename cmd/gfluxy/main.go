@@ -13,8 +13,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/maxid/gfluxy/internal/config"
+	"github.com/maxid/gfluxy/internal/control"
 	"github.com/maxid/gfluxy/internal/server"
 	"github.com/maxid/gfluxy/internal/version"
 )
@@ -58,6 +60,16 @@ func run(path string) error {
 	}
 	fmt.Fprintf(os.Stderr, "gfluxy: listening on %s\n", cfg.Listen.Addr)
 
+	ctrl := control.New(cfg.Admin.Addr)
+	if err := ctrl.Start(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "gfluxy: control plane on %s\n", ctrl.Addr())
+
 	<-ctx.Done()
+
+	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = ctrl.Stop(shutdown)
 	return srv.Stop()
 }

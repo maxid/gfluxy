@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -68,8 +69,122 @@ func New(cfg *config.Config) (*Server, error) {
 			BaseDomain: cfg.Tenant.BaseDomain,
 			Exact:      cfg.Tenant.Exact,
 		},
+		registryType: cfg.Registry.Type,
 	})
+	stored := make([]config.Route, len(cfg.Routes))
+	copy(stored, cfg.Routes)
+	appliedRoutes.Store(&stored)
+	configVersion.Store(1) // the start-up document is version 1
 	return &Server{doc: doc, reg: reg, closers: closers}, nil
+}
+
+// Status is the control plane's view of the data plane.
+type Status struct {
+	Version       uint64 `json:"version"`
+	Routes        int    `json:"routes"`
+	RegistryOK    bool   `json:"registry_ok"`
+	RegistryError string `json:"registry_error,omitempty"`
+}
+
+var (
+	configVersion atomic.Uint64
+	appliedRoutes atomic.Pointer[[]config.Route]
+)
+
+// ValidateRoutes runs every check ApplyRoutes would run, without touching the
+// running table.
+func ValidateRoutes(routes []config.Route) error {
+	current := active.Load()
+	if current == nil {
+		return fmt.Errorf("gateway is not initialised")
+	}
+	if _, err := compileRoutes(routes); err != nil {
+		return err
+	}
+	if _, err := buildPolicies(); err != nil {
+		return err
+	}
+	if current.registryType == "static" {
+		return checkServicesServed(routes, current.reg)
+	}
+	return nil
+}
+
+// ApplyRoutes validates a new routing document and swaps it in as one atomic
+// step. A rejected document leaves the running table untouched.
+func ApplyRoutes(routes []config.Route) (uint64, error) {
+	current := active.Load()
+	if current == nil {
+		return configVersion.Load(), fmt.Errorf("gateway is not initialised")
+	}
+	if err := ValidateRoutes(routes); err != nil {
+		return configVersion.Load(), err
+	}
+
+	table, err := compileRoutes(routes)
+	if err != nil {
+		return configVersion.Load(), err
+	}
+	policies, err := buildPolicies()
+	if err != nil {
+		return configVersion.Load(), err
+	}
+
+	active.Store(&gateway{
+		table:        table,
+		reg:          current.reg,
+		health:       current.health,
+		policies:     policies,
+		tenant:       current.tenant,
+		registryType: current.registryType,
+	})
+	stored := make([]config.Route, len(routes))
+	copy(stored, routes)
+	appliedRoutes.Store(&stored)
+
+	return configVersion.Add(1), nil
+}
+
+// CurrentRoutes returns the document currently in force.
+func CurrentRoutes() []config.Route {
+	stored := appliedRoutes.Load()
+	if stored == nil {
+		return nil
+	}
+	out := make([]config.Route, len(*stored))
+	copy(out, *stored)
+	return out
+}
+
+// Version returns the number of successfully applied documents.
+func Version() uint64 { return configVersion.Load() }
+
+// Ready reports whether the data plane can serve traffic.
+func Ready() bool {
+	current := active.Load()
+	if current == nil {
+		return false
+	}
+	if reporter, ok := current.reg.(registry.StatusReporter); ok && reporter.Status() != nil {
+		return false
+	}
+	return true
+}
+
+// Snapshot reports the running state.
+func Snapshot() Status {
+	status := Status{Version: configVersion.Load(), Routes: len(CurrentRoutes()), RegistryOK: true}
+	current := active.Load()
+	if current == nil {
+		return status
+	}
+	if reporter, ok := current.reg.(registry.StatusReporter); ok {
+		if err := reporter.Status(); err != nil {
+			status.RegistryOK = false
+			status.RegistryError = err.Error()
+		}
+	}
+	return status
 }
 
 // Start loads the configuration and begins serving. It returns once the

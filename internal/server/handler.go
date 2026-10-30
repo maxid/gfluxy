@@ -27,11 +27,12 @@ const handlerName = "gfluxy"
 // gateway is the immutable state a request reads: the routing table and the
 // registry. Replacing the pointer is the whole of a hot update.
 type gateway struct {
-	table    *route.Table
-	reg      registry.Registry
-	health   *health.Tracker
-	policies map[string]lb.Policy
-	tenant   tenant.Resolver
+	table        *route.Table
+	reg          registry.Registry
+	health       *health.Tracker
+	policies     map[string]lb.Policy
+	tenant       tenant.Resolver
+	registryType string
 }
 
 var active atomic.Pointer[gateway]

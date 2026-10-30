@@ -16,9 +16,16 @@ import (
 // Config is the on-disk start-up configuration.
 type Config struct {
 	Listen   Listen   `yaml:"listen"`
+	Admin    Admin    `yaml:"admin"`
 	Tenant   Tenant   `yaml:"tenant"`
 	Registry Registry `yaml:"registry"`
 	Routes   []Route  `yaml:"routes"`
+}
+
+// Admin is the control/observability listener. It must not be exposed to the
+// public network: it mutates routing without authentication.
+type Admin struct {
+	Addr string `yaml:"addr"`
 }
 
 // Listen describes the single public listener.
@@ -118,12 +125,18 @@ func (c *Config) applyDefaults() {
 	if c.Registry.Type == "" {
 		c.Registry.Type = "static"
 	}
+	if c.Admin.Addr == "" {
+		c.Admin.Addr = "127.0.0.1:9000"
+	}
 }
 
 // Validate rejects configurations the server cannot honour.
 func (c *Config) Validate() error {
 	if c.Listen.Addr == "" {
 		return errors.New("listen.addr is required")
+	}
+	if c.Admin.Addr == "" {
+		return errors.New("admin.addr is required")
 	}
 	if (c.Listen.TLS.CertFile == "") != (c.Listen.TLS.KeyFile == "") {
 		return errors.New("listen.tls requires both cert_file and key_file")

@@ -45,6 +45,7 @@ func TestDataPlane(t *testing.T) {
 
 	cfg := &config.Config{
 		Listen: config.Listen{Addr: addr, TLS: config.TLS{CertFile: certFile, KeyFile: keyFile}},
+		Admin:  config.Admin{Addr: freeAddr(t)},
 		Tenant: config.Tenant{Source: "host"},
 		Registry: config.Registry{
 			Type: "static",
