@@ -1,113 +1,113 @@
 ---
 id: goal
 type: goal-and-requirements
-title: gfluxy — 北向流量网关（目标与需求）
+title: gfluxy — northbound traffic gateway (goals and requirements)
 status: active
 ---
 
-# gfluxy — 北向流量网关
+# gfluxy — northbound traffic gateway
 
-## 目标
+## Goals
 
-用**一个端口**承接 HTTP/1.1、HTTP/2、HTTP/3 与 WebSocket，按冻结的 `/api/*` 前缀把前端与客户端流量路由到裸路径后端；上游实例来自注册中心（静态文件 / Nacos），流量可按请求头、租户、百分比做**确定性**灰度分流。
+Accept HTTP/1.1, HTTP/2, HTTP/3 and WebSocket on **one port**, route frontend and client traffic from the frozen `/api/*` prefixes to bare backend paths, discover upstream instances through a registry (static file / Nacos), and split traffic **deterministically** by request header, tenant or percentage.
 
-v0 的完成判据：
+v0 completion criteria:
 
-1. 同一端口（TCP 与 UDP 同号）同时服务 h1/h2/h3；WebSocket 升级成功且长连接稳定。
-2. 带业务前缀的路径（如 `/api/catalog/**`、`/api/orders/**`、`/api/auth/**`）剥前缀后命中后端裸路径。
-3. Nacos 实例上下线在秒级反映到路由；故障实例被健康检查剔除。
-4. 灰度：同一租户 / 同一 hash key 不反转版本；百分比偏差在 10k 请求下 ≤ ±2%。
-5. 规则变更热生效，不重启进程、不重载数据面配置。
+1. One port (TCP and UDP with the same number) serves h1/h2/h3; WebSocket upgrade succeeds and long-lived connections stay stable.
+2. Prefixed paths (`/api/catalog/**`, `/api/orders/**`, `/api/auth/**`) hit bare backend paths after stripping.
+3. Nacos instance changes are reflected in routing within seconds; unhealthy instances are evicted.
+4. Canary: the same tenant/hash key does not flip versions; percentage deviation over 10k requests is ≤ ±2%.
+5. Rule changes take effect hot, without restarting the process or reloading data-plane configuration.
 
-## 问题
+## Problem
 
-三个现实约束同时成立：
+Three real constraints hold at once:
 
-- **客户端契约固定**：既有客户端只认带前缀的路径（`/api/<domain>/**`），而后端是裸路径——剥离前缀原本由边界代理承担，网关接手后必须逐字节保持同一语义。
-- **拓扑会拆**：单机形态是一个进程；集群形态下 iam/admin/iot 各自多副本，入口必须按服务选路并按实例负载均衡。
-- **发布需要灰度**：新版本先给指定租户/测试流量，再按百分比放大；同一个租户不能在一次会话里来回切版本。
+- **The client contract is fixed**: existing clients only know prefixed paths (`/api/<domain>/**`), while backends expose bare paths. The edge proxy used to strip the prefix; the gateway must preserve the same semantics byte for byte.
+- **Topology splits**: a single process on one machine; in a cluster, iam/admin/iot each have replicas, so the entry must route by service and load-balance by instance.
+- **Releases need canaries**: a new version goes to named tenants/test traffic first, then a percentage. A tenant must not flip versions within one session.
 
-既有部署里这三件事分别由边界代理、带注册中心的入口网关、人工调权重完成；入口层本身不含业务逻辑，也不承担鉴权。
+Existing deployments split these across an edge proxy, a registry-aware entry gateway and manual weight changes. The entry layer has no business logic and does not authenticate.
 
-## 面向谁
+## Audience
 
-- **首要**：运维与私有化交付团队——单机与集群两种形态都要一个入口，且客户端零改动。
-- **其次**：任何在注册中心里有实例、需要灰度与端口收敛的自研服务。
-- **不是**给公网租户直接暴露的边界防护设备（无鉴权、无 WAF）。
+- **Primary**: operations and private-deployment teams — one entry for single-node and cluster shapes, with zero client changes.
+- **Secondary**: any self-built service with instances in a registry that needs canaries and port consolidation.
+- **Not** an edge protection device for public tenants (no auth, no WAF).
 
-## 能力（v0）
+## Capabilities (v0)
 
-| 能力 | 说明 |
+| Capability | Description |
 |---|---|
-| 单端口收敛 | TCP+UDP 同号端口；TCP 上 ALPN 协商 h2/h1 并支持 WS 升级，UDP 上 h3 |
-| 路径路由 | 主机 + 路径前缀匹配，最长前缀优先，支持 `StripPrefix=N` |
-| 上游发现 | `static`（配置文件内联）与 `nacos`（订阅实例列表），统一归一化为 `LabelSet` |
-| 负载均衡 | 加权轮询、最少连接、一致性哈希（按会话键） |
-| 灰度分流 | 请求头、租户、百分比三个维度；租户按 Host 域名推断；确定性哈希，同键不反转 |
-| 控制面 | `GET/PUT /v1/config` 原子生效、`POST /v1/validate`、`GET /v1/status` |
-| 观测 | 结构化访问日志、`/metrics`、`/healthz` 与 `/readyz` |
-| 健康检查 | 被动剔除（连续失败）+ 可选主动探测；全组不健康时快速失败 |
+| Single-port convergence | TCP+UDP same numeric port; TCP negotiates h2/h1 via ALPN and supports WS upgrade; h3 over UDP |
+| Path routing | Host + path-prefix matching, longest prefix first, `StripPrefix=N` |
+| Upstream discovery | `static` (inline config) and `nacos` (instance subscription), normalized to `LabelSet` |
+| Load balancing | Weighted round robin, least connections, consistent hash (session key) |
+| Canary | Header, tenant, percentage; tenant inferred from Host; deterministic hash, same key never flips |
+| Control plane | `GET/PUT /v1/config` atomic apply, `POST /v1/validate`, `GET /v1/status` |
+| Observability | Structured access log, `/metrics`, `/healthz`, `/readyz` |
+| Health checks | Passive eviction (consecutive failures) + optional active probes; fail fast when a whole group is unhealthy |
 
-## 非目标（v0 明确不做）
+## Non-goals (explicitly out of v0)
 
-- **认证/鉴权**：不解析 token、不做内省。认证在各服务，与现网一致。
-- **限流/熔断/WAF**：属新增范围，需要独立需求与阈值语义。
-- **TLS 证书自动签发（ACME）**：v0 只接静态证书，证书由边缘或运维提供。
-- **L4 协议代理**（MySQL/Redis/TCP 业务协议）：只做 HTTP 家族与 WS。
-- **配置管理 UI、多租户管理面**：控制面只有 HTTP API。
-- **会话迁移**：WS 实例下线时断开连接、由客户端重连，不做连接搬迁。
-- **gRPC / GraphQL 转码**：不解析请求体。
+- **Auth/authorization**: no token parsing or introspection. Authentication stays in each service, as today.
+- **Rate limiting/circuit breaking/WAF**: new scope; needs separate requirements and threshold semantics.
+- **Automatic TLS certificates (ACME)**: v0 accepts static certificates only, supplied by the edge or operations.
+- **L4 proxying** (MySQL/Redis/TCP business protocols): HTTP family and WS only.
+- **Config UI, multi-tenant admin plane**: the control plane is an HTTP API only.
+- **Session migration**: when a WS instance goes down the connection closes and the client reconnects; no connection migration.
+- **gRPC/GraphQL transcoding**: request bodies are not parsed.
 
-## 约束
+## Constraints
 
-- **纯反代**：不读、不改、不缓存业务请求体；只改路径、头与目标地址。
-- **数据面内核用 Caddy（Apache-2.0）**：复用其 TLS、h1/h2/h3 与 WS 升级；gfluxy 提供路由、发现、灰度、控制面四个自有部分。产品名不得使用 Caddy 商标暗示背书。
-- **规则热更新不重载数据面**：数据面配置启动后固定，业务规则来自内存快照。
-- **确定性**：同一输入（路由 + hash key + 规则版本）必须得到同一目标组，与实例数量无关。
-- **独立中间件**：不绑定任何特定业务平台——文档、示例、测试与代码注释不出现具体平台的模块名、路径或契约；示例一律使用中性业务名。
+- **Pure reverse proxy**: never read, modify or cache business request bodies; only rewrite path, headers and target address.
+- **Data-plane kernel is Caddy (Apache-2.0)**: reuse TLS, h1/h2/h3 and WS upgrade; gfluxy owns routing, discovery, canary and the control plane. Product names must not imply Caddy endorsement.
+- **Rule hot updates do not reload the data plane**: data-plane config is fixed after startup; business rules come from an in-memory snapshot.
+- **Determinism**: the same input (route + hash key + rule version) must select the same target group regardless of instance count.
+- **Independent middleware**: no product platform binding — docs, examples, tests and code comments contain no platform module names, paths or contracts; examples use neutral business names.
 
-## 行为契约（用户可见）
+## Behaviour contracts (user-visible)
 
-### 前缀剥离
+### Prefix stripping
 
-| 请求路径 | Strip | 上游收到 |
+| Request path | Strip | Upstream receives |
 |---|---|---|
 | `/api/catalog/items` | 2 | `/users` |
 | `/api/orders/page` | 2 | `/devices/page` |
 | `/api/auth/login` | 1 | `/auth/login` |
-| 其它未匹配路径 | — | `404`（不猜默认上游） |
+| Any unmatched path | — | `404` (no guessed default upstream) |
 
-### 灰度
+### Canary
 
-- 规则按顺序求值，**首条命中即生效**；未命中任何规则走稳定组（`labels.color=stable`）。
-- 命中条件：请求头等值、租户等值、百分比区间。
-- **租户从 Host 推断**，与 Java 登录时解析顺序一致：精确域名映射 → `{code}.{base-domain}` → Host 最左标签；映射表由配置提供，网关不查业务库。
-- **入站 `X-Tenant-Id` 不参与灰度决策**：Java 侧该头只有根租户运营方可用，且要 fail-closed 校验；网关无鉴权判定不了调用方身份。该头原样透传给后端，不删不改。
-- 百分比用确定性哈希：`hash(route + hashKey) mod 10000 < percent*100`；`hashKey` 依次取 推断出的租户 → 配置的会话 cookie → 客户端 IP。
-- 同一 hashKey 在规则版本不变时**永远命中同一分支**；灰度比例上调只扩大命中集合，不重排既有用户。
-- **稳定组 = 未被任何规则目标认领的实例**：运维不需要给稳定实例额外打标签，新上线的金丝雀只要带上目标标签就自动被摘出稳定组。
-- 命中的目标组**没有实例时返回 503**，不回退到稳定组——静默回退会让一次失败的发布看起来像成功。
-- 响应带 `X-Gfluxy-Gray` 头（如 `version=1.1.0`），便于在浏览器/日志里确认请求落在哪一组。
+- Rules evaluate in order; **first match wins**; no match uses the stable group (`labels.color=stable`).
+- Match conditions: header equality, tenant equality, percentage interval.
+- **Tenant is inferred from Host**, following the existing platform login order: exact domain mapping → `{code}.{base-domain}` → leftmost Host label. The mapping table is configuration; the gateway does not query business databases.
+- **Inbound `X-Tenant-Id` does not participate**: on the existing platform only the root-tenant operator may use it, and it is fail-closed validated. The gateway has no identity to validate. The header is passed through unchanged.
+- Percentage uses a deterministic hash: `hash(route + hashKey) mod 10000 < percent*100`; `hashKey` is inferred tenant → configured session cookie → client IP.
+- The same hashKey always selects the same branch while the rule version is unchanged; increasing the percentage only grows the hit set and never reshuffles existing users.
+- **The stable group is the instances no rule targets**: operations need no extra label on stable instances; a new canary carrying the target label is automatically excluded from stable.
+- If the matched target group has no instances, return `503`; never fall back to stable — a silent fallback makes a failed release look successful.
+- Responses carry `X-Gfluxy-Gray` (for example `version=1.1.0`) to confirm the selected group in browsers/logs.
 
-### 故障与降级
+### Failure and degradation
 
-- Nacos 不可用：沿用最后一次成功的实例列表（stale-while-error），并在 `/status` 标记 `degraded`；不整站白屏。
-- 某实例连续失败达阈值：剔除，冷却期后半开重试。
-- 一组实例全不健康：直接 `503`，不把请求打给已知故障实例。
+- Nacos unavailable: keep the last successful instance list (stale-while-error) and mark `/status` `degraded`; do not blank the whole site.
+- An instance reaching the consecutive-failure threshold is evicted; half-open retry after a cooldown.
+- A group with no healthy instance returns `503`; never send traffic to a known-bad instance.
 
 ### WebSocket
 
-- 仅经 h1 升级（h2 扩展 CONNECT 与 h3 WS 客户端支持度不足，v0 不做）。
-- 连接建立后**粘住**同一实例；实例下线即断开，由客户端重连并由 LB 选新实例。
-- 空闲与心跳超时按路由可配，默认不主动断开。
+- Upgrade over h1 only (h2 extended CONNECT and h3 WS client support are insufficient in v0).
+- After establishment **stick** to one instance; when the instance goes down the connection closes and the client reconnects through the LB.
+- Idle/heartbeat timeouts are per-route configurable; no default active disconnect.
 
-### h3 回落
+### h3 fallback
 
-- 客户端不支持 QUIC 时由 ALPN 自然回落到 h2/h1，不需要额外配置。
-- 服务端 `Alt-Svc` 由数据面内核发出，gfluxy 不干预。
+- A client without QUIC falls back to h2/h1 via ALPN; no extra configuration.
+- The data-plane kernel emits `Alt-Svc`; gfluxy does not interfere.
 
-## 已知限制
+## Known limits
 
-- **不解析 token**：租户只能从 Host 推断，因此同一域名下的多个租户无法区分；跨租户灰度需要配合域名或前置认证边缘。
-- 运营方切租户（`X-Tenant-Id`）由后端基于 token 权限判定，网关不参与也不校验，只透传。
-- 灰度规则只按请求属性判定，不感知业务会话；跨多路由的同一租户需要每条路由各自配置规则。
+- **No token parsing**: a tenant can only be inferred from Host, so multiple tenants on one domain cannot be distinguished; cross-tenant canaries need separate domains or an authenticating edge.
+- Operator tenant switching (`X-Tenant-Id`) is decided by the backend from token permissions; the gateway neither participates nor validates, only passes it through.
+- Canary rules only evaluate request attributes, not business sessions; the same tenant across multiple routes needs a rule per route.

@@ -1,125 +1,125 @@
 ---
 id: architecture
 type: architecture-design
-title: gfluxy 架构与模块边界
+title: gfluxy architecture and module boundaries
 status: active
 parent: goal
 ---
 
-# gfluxy 架构与模块边界
+# gfluxy architecture and module boundaries
 
-## 总览
+## Overview
 
 ```
-              ┌────────────── 控制面（admin 端口，HTTP/1.1） ──────────────┐
-  运维/CI ───▶│ PUT /v1/config → validate → 构建不可变快照 → 原子生效        │
+              ┌────────────── control plane (admin port, HTTP/1.1) ──────────────┐
+  ops/CI ────▶│ PUT /v1/config → validate → build immutable snapshot → atomic apply│
               └───────────────────────────┬───────────────────────────────┘
                                           │ snapshot（atomic.Value）
-  客户端 ──▶ 单端口 TCP+UDP ──▶ Caddy ──▶ gfluxy handler ──▶ ReverseProxy ──▶ upstream
-   (h1/h2/h3/WS)   (TLS/ALPN/QUIC)   │  路由匹配/剥前缀/灰度决策/LB 选实例
+  clients ──▶ single TCP+UDP port ──▶ Caddy ──▶ gfluxy handler ──▶ ReverseProxy ──▶ upstream
+   (h1/h2/h3/WS)   (TLS/ALPN/QUIC)   │  route match/strip/canary/LB selection
                                      │
-                                     └── Registry（static / nacos）──▶ 实例列表 + LabelSet
+                                     └── Registry（static / nacos）──▶ instances + LabelSet
 ```
 
-三个面：
+Three planes:
 
-- **数据面**：Caddy 负责监听、TLS、协议协商与 ws 升级；gfluxy 的 HTTP handler 负责路由、灰度与反代。数据面配置在进程启动后**不再变化**。
-- **控制面**：只读写内存快照，`PUT /v1/config` 全量校验后原子替换；不碰数据面配置。
-- **观测面**：访问日志、`/metrics`、`/healthz`、`/readyz`、`/v1/status`。
+- **Data plane**: Caddy owns listening, TLS, protocol negotiation and WS upgrade; gfluxy's HTTP handler owns routing, canary and reverse proxying. Data-plane config never changes after startup.
+- **Control plane**: reads/writes only the in-memory snapshot; `PUT /v1/config` validates the full document then atomically replaces it; data-plane config is untouched.
+- **Observability plane**: access log, `/metrics`, `/healthz`, `/readyz`, `/v1/status`.
 
-## 请求生命周期
+## Request lifecycle
 
-1. Caddy 接受连接，按 ALPN/QUIC 确定为 h1、h2 或 h3；WS 升级发生在 h1。
-2. 交给 gfluxy handler（唯一的 catch-all handler）。
-3. 从快照取路由表，按 主机 + 最长路径前缀 匹配；无匹配 → `404`。
-4. 按 `StripPrefix` 改写路径。
-5. 对该路由求灰度：取 hashKey → 顺序求值规则 → 得到目标 `LabelSet`（默认 `color=stable`）。
-6. Registry 返回该服务当前实例（已剔除不健康），按目标 LabelSet 过滤为候选组。
-7. LB 策略在候选组内选一个实例（加权轮询 / 最少连接 / 一致性哈希）。
-8. `httputil.ReverseProxy` 转发，注入 `X-Forwarded-*` 与 `X-Gfluxy-Route`/`X-Gfluxy-Gray` 供排障；响应原样写回。
-9. 记录访问日志与指标；实例失败计数回写 Registry。
+1. Caddy accepts the connection and determines h1, h2 or h3 from ALPN/QUIC; WS upgrade happens on h1.
+2. It hands the request to the gfluxy handler (the only catch-all handler).
+3. The handler takes the routing table from the snapshot and matches host + longest path prefix; no match → `404`.
+4. It rewrites the path by `StripPrefix`.
+5. It evaluates the canary: hashKey → rules in order → target `LabelSet` (default `color=stable`).
+6. The registry returns current instances (unhealthy already removed), filtered by the target LabelSet.
+7. The LB policy picks one instance in the candidate group (weighted round robin / least connections / consistent hash).
+8. `httputil.ReverseProxy` forwards, injecting `X-Forwarded-*` and `X-Gfluxy-Route`/`X-Gfluxy-Gray` for troubleshooting; the response is written back unchanged.
+9. Access log and metrics are recorded; instance failure counts are written back to the registry.
 
-## 包结构
+## Package structure
 
-| 包 | 职责 | 允许依赖 |
+| Package | Responsibility | Allowed dependencies |
 |---|---|---|
-| `cmd/gfluxy` | 参数解析、装配、信号处理 | 以下全部 |
-| `internal/config` | 静态启动配置（监听地址、TLS、admin、注册中心、日志） | 标准库 |
-| `internal/control` | 控制面 API、快照校验与原子生效 | `snapshot`、`route`、`canary` |
-| `internal/snapshot` | 不可变规则快照 + 版本号 | `route`、`canary` |
-| `internal/route` | 路由表编译与匹配（主机/前缀/StripPrefix） | 标准库 |
-| `internal/registry` | `Registry` 接口、`Endpoint`、`LabelSet`、健康计数 | 标准库 |
-| `internal/registry/static` | 内联/文件实例表 | `registry` |
-| `internal/registry/nacos` | Nacos 订阅适配，元数据归一化 | `registry`、nacos SDK |
-| `internal/lb` | 加权轮询、最少连接、一致性哈希 | `registry` |
-| `internal/canary` | 灰度规则求值、确定性哈希 | `registry` |
-| `internal/server` | Caddy 装配、handler 实现、反代 | `route`、`canary`、`lb`、`registry` |
-| `internal/obs` | 访问日志、metrics、健康探针 | 标准库 |
+| `cmd/gfluxy` | flags, assembly, signal handling | all below |
+| `internal/config` | static startup config (listen, TLS, admin, registry, logging) | standard library |
+| `internal/control` | control-plane API, snapshot validation and atomic apply | `snapshot`, `route`, `canary` |
+| `internal/snapshot` | immutable rule snapshot + version | `route`, `canary` |
+| `internal/route` | routing table compile/match (host/prefix/StripPrefix) | standard library |
+| `internal/registry` | `Registry` interface, `Endpoint`, `LabelSet`, health counters | standard library |
+| `internal/registry/static` | inline/file instance table | `registry` |
+| `internal/registry/nacos` | Nacos subscription adapter, metadata normalization | `registry`, nacos SDK |
+| `internal/lb` | weighted round robin, least connections, consistent hash | `registry` |
+| `internal/canary` | canary rule evaluation, deterministic hash | `registry` |
+| `internal/server` | Caddy assembly, handler, reverse proxy | `route`, `canary`, `lb`, `registry` |
+| `internal/obs` | access log, metrics, health probes | standard library |
 
-依赖方向单向：`server → canary/lb/route/registry`，`control → snapshot`，注册中心适配器只依赖 `registry` 的接口。
+Dependencies are one-way: `server → canary/lb/route/registry`, `control → snapshot`; registry adapters depend only on the `registry` interface.
 
-## 核心模型
+## Core models
 
 ```go
 type Endpoint struct {
     Addr    string            // host:port
-    Weight  int               // 默认 1
-    Labels  LabelSet          // version/color/group，注册中心元数据归一化后
+    Weight  int               // default 1
+    Labels  LabelSet          // version/color/group, normalized from registry metadata
     Healthy bool
 }
 
-type LabelSet map[string]string // 只保留 version、color、group 三个键
+type LabelSet map[string]string // only version, color and group are kept
 
 type Route struct {
-    Host        string   // 可空，空表示任意主机
-    PathPrefix  string   // 最长前缀优先
+    Host        string   // empty means any host
+    PathPrefix  string   // longest prefix first
     StripPrefix int
-    Service     string   // Registry 里的服务名
+    Service     string   // registry service name
     Policy      string   // wrr | least_conn | hash
-    Gray        []Rule   // 顺序求值，首条命中
+    Gray        []Rule   // evaluated in order, first match wins
 }
 
 type Rule struct {
-    MatchHeader  string // 头名，空表示不按头匹配
-    MatchValue   string
-    MatchTenant  string // 租户等值，空表示不按租户匹配
-    Percent      int    // 0..100，0 表示只按显式匹配
-    Target       LabelSet
+    MatchHeader string // header name; empty means no header match
+    MatchValue  string
+    MatchTenant string // tenant equality; empty means no tenant match
+    Percent     int    // 0..100; 0 means explicit match only
+    Target      LabelSet
 }
 ```
 
-## 控制面契约
+## Control-plane contract
 
-| 方法 | 路径 | 语义 |
+| Method | Path | Semantics |
 |---|---|---|
-| `GET` | `/v1/config` | 返回当前生效的配置文档与版本号 |
-| `PUT` | `/v1/config` | 全量校验后原子生效；校验失败返回 `422` 且旧快照不变 |
-| `POST` | `/v1/validate` | 只校验，不生效 |
-| `GET` | `/v1/status` | 版本号、注册中心连接状态、实例健康汇总、最近一次生效时间 |
-| `GET` | `/healthz` `/readyz` | 进程存活 / 可接流量（快照已加载且至少一个上游可用） |
+| `GET` | `/v1/config` | current effective config document and version |
+| `PUT` | `/v1/config` | full-document validation then atomic apply; failure returns `422` and keeps the old snapshot |
+| `POST` | `/v1/validate` | validate only, no apply |
+| `GET` | `/v1/status` | version, registry connection state, instance health summary, last apply time |
+| `GET` | `/healthz` `/readyz` | process liveness / readiness (snapshot loaded and at least one upstream usable) |
 
-**为什么是全量 PUT 而不是逐资源 CRUD**：灰度规则之间有顺序语义，逐条改会产生中间态；全量文档 + 单次原子替换让「规则从哪一刻开始生效」没有歧义。逐资源 PATCH 留到有 UI 时再做。
+**Why full PUT rather than per-resource CRUD**: canary rules have ordering semantics; changing one at a time creates intermediate states. A full document + one atomic swap makes "when the rules became effective" unambiguous. Per-resource PATCH waits until there is a UI.
 
-## 热更新语义
+## Hot-update semantics
 
-- 快照是不可变结构，`atomic.Value` 持有；请求路径只读快照，不取锁。
-- `PUT /v1/config` 顺序：解析 → 校验（路由重叠、灰度百分比、服务存在、StripPrefix 合法）→ 编译路由索引 → 写入新快照 → 版本号 +1。
-- 失败即拒绝，旧快照与版本号不变；不出现「部分生效」。
-- 注册中心变更不进快照，只更新各服务的实例表（同样原子替换），因此实例变动不会改变规则版本。
+- The snapshot is immutable and held in `atomic.Value`; request paths read it lock-free.
+- `PUT /v1/config`: parse → validate (route overlap, canary percentages, service existence, valid StripPrefix) → compile route index → store new snapshot → increment version.
+- Failure rejects the whole update; the old snapshot and version remain; no partial apply.
+- Registry changes do not enter the snapshot; they replace each service's instance table atomically, so instance changes do not change the rule version.
 
-## 关键决策
+## Key decisions
 
-| 决策 | 选择 | 被否方案 | 理由 |
+| Decision | Choice | Rejected | Reason |
 |---|---|---|---|
-| 数据面内核 | Caddy 作为库，只用其监听/TLS/h1-h2-h3/WS | 从零用 `net/http` + `quic-go` | QUIC、TLS 热加载、WS 升级的细节风险高；自研 6–10 人周 vs 复用 2–4 人周 |
-| 反代位置 | gfluxy 自己的 handler 用 `httputil.ReverseProxy` | 用 Caddy `reverse_proxy` + 自定义 upstream/policy 模块 | 后者的上游列表在配置加载期固化，规则热更新要触发 Caddy 重载，与「不重载」约束冲突 |
-| 配置生效 | 全量文档原子替换 | 逐资源 CRUD、Caddy admin API reload | 灰度有顺序语义，逐条改会出现中间态与部分生效 |
-| Nacos 耦合度 | 只取实例与健康，元数据归一化为 `LabelSet`；发布态由控制面写入 | 直接读 `metadata.version` 做灰度 | 换注册中心或改元数据键名时，灰度规则不该跟着改 |
-| 租户来源 | Host 域名推断（精确映射 → `{code}.{base-domain}` → 最左标签），可配 | 读 `X-Tenant-Id` 头、解析 token | 前者客户端可伪造，后者需要鉴权；网关两样都不做，所以只认不可伪造的 Host |
-| WebSocket | 隧道：101 之后字节透传（`ReverseProxy` 自带） | 用第三方 WS 库终结再转发 | 终结会丢 `permessage-deflate` 与任意 101 头，且要自带监听器；隧道保留 subprotocol/扩展协商，`tunnel_test.go` 已钉住 |
-| 灰度哈希 | `hash(route+hashKey) mod 10000`，与实例无关 | 随机数、按实例列表取模 | 前者保证同键不反转、加实例不重排 |
+| Data-plane kernel | Caddy as a library, only its listener/TLS/h1-h2-h3/WS | build on `net/http` + `quic-go` | QUIC, TLS hot reload and WS upgrade details are risky; 6–10 person-weeks vs 2–4 |
+| Proxy location | gfluxy's own handler with `httputil.ReverseProxy` | Caddy `reverse_proxy` + custom upstream/policy modules | Caddy's upstream list is fixed at config load; rule hot updates would need a reload, conflicting with "no reload" |
+| Config apply | full-document atomic replace | per-resource CRUD, Caddy admin reload | canary has ordering semantics; per-resource changes create intermediate/partial states |
+| Nacos coupling | only instances and health; metadata normalized to `LabelSet`; release state written by the control plane | read `metadata.version` directly for canary | changing registries or metadata keys must not change canary rules |
+| Tenant source | Host inference (exact mapping → `{code}.{base-domain}` → leftmost label), configurable | read `X-Tenant-Id`, parse token | the header is client-forgeable, token parsing needs auth; the gateway does neither, so it trusts only the Host |
+| WebSocket | tunnel: byte passthrough after 101 (`ReverseProxy`) | terminate with a third-party WS library | termination loses `permessage-deflate` and arbitrary 101 headers, and needs its own listener; tunneling preserves subprotocol/extension negotiation, pinned by `tunnel_test.go` |
+| Canary hash | `hash(route+hashKey) mod 10000`, independent of instances | random, modulo instance list | deterministic; same key never flips, adding instances does not reshuffle |
 
-## 配置示例
+## Configuration example
 
 ```yaml
 listen:
@@ -138,12 +138,12 @@ registry:
 tenant:
   source: host              # host | header
   base_domain: example.com
-  exact:                    # 精确域名 → 租户编码
+  exact:                    # exact domain -> tenant code
     "admin.example.com": "management"
 tenant_header: X-Tenant-Id
 ```
 
-动态部分（`PUT /v1/config`）：
+Dynamic part (`PUT /v1/config`):
 
 ```yaml
 routes:
@@ -167,17 +167,17 @@ routes:
     service: iam
 ```
 
-## 测试策略
+## Test strategy
 
-- **单元**：路由最长前缀与 StripPrefix、灰度哈希的确定性与分布、加权轮询比例、实例过滤（LabelSet + 健康）、快照校验的拒绝路径。
-- **集成**：`httptest` 上游 + 真实监听；h3 用 `quic-go` 客户端发请求；WS 用 echo 上游验证升级与粘性；Nacos 用假适配器注入上下线事件。
-- **e2e 脚本**：`make e2e` 起 three-upstream 场景，断言 404/503/灰度比例/粘性/热更新不重启。
+- **Unit**: longest-prefix routing and StripPrefix, canary hash determinism/distribution, weighted round-robin ratio, instance filtering (LabelSet + health), snapshot validation rejection paths.
+- **Integration**: `httptest` upstream + real listener; h3 requests with a `quic-go` client; WS with an echo upstream to verify upgrade and stickiness; Nacos with a fake adapter injecting online/offline events.
+- **e2e script**: `make e2e` starts a three-upstream scenario and asserts 404/503/canary ratio/stickiness/hot update without restart.
 
-## 风险
+## Risks
 
-| 风险 | 影响 | 缓解 |
+| Risk | Impact | Mitigation |
 |---|---|---|
-| Caddy 的 h3 + WS + 单端口组合在真实网络下的行为 | 入口不可用 | 第 3 步先做最小监听并跑通 h3/WS 回归，再叠业务逻辑 |
-| 无鉴权时租户头可伪造 | 灰度被绕过 | 文档标注为已知限制；生产由边缘剥离客户端租户头 |
-| `nacos-sdk-go` 版本与 Nacos 2.x/3.x 服务端兼容 | 发现失效 | 适配层只依赖接口；先支持 Nacos 2.x gRPC，3.x 用同一 SDK 验证 |
-| 全量 PUT 的并发写 | 后写覆盖先写 | 单写者语义（运维/CI），响应带版本号；后续可加 `If-Match` 乐观锁 |
+| Caddy h3 + WS + single-port behavior in real networks | entry unavailable | step 3 starts with a minimal listener and h3/WS regression before business logic |
+| tenant header forgeable without auth | canary bypass | documented known limit; production edge strips client tenant headers |
+| `nacos-sdk-go` compatibility with Nacos 2.x/3.x servers | discovery failure | adapter depends on interfaces only; start with Nacos 2.x gRPC, verify 3.x with the same SDK |
+| concurrent full PUTs | later write overwrites earlier | single-writer semantics (ops/CI), version in the response; `If-Match` optimistic locking later |
